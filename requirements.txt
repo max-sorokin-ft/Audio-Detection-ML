@@ -3,3 +3,11 @@ torch
 torchaudio
 librosa
 numpy
+datasets
+requests
+torchcodec
+pandas
+beautifulsoup4
+lxml
+logging
+tqdm
