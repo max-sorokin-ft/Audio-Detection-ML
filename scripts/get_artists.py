@@ -7,7 +7,7 @@ import json
 import time
 import logging
 from google.cloud import storage
-
+import argparse
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s"
@@ -16,16 +16,14 @@ logger = logging.getLogger(__name__)
 
 """
     This script is part of the data acquisition pipeline for the project and it is used to get the artists and their metadata.
-    It first scrapes the kworb's page to get the artists names, spotify id, and listeners.
+    It first scrapes the kworb's page to get the artist's names, spotify id, and listeners.
     Then it uses the spotify id to get the artist's metadata from the spotify api.
-    The metadata is saved to a json file, and uploaded to a gcp bucket.
+    The json data is uploaded to a gcs bucket.
 """
-
-BASE_URL = "https://kworb.net/spotify/listeners{page_number}.html"
-
 
 def get_artists_kworb(page_number):
     """Gets the html of the page from kworb's page"""
+    BASE_URL = "https://kworb.net/spotify/listeners{page_number}.html"
     logger.info(f"Getting html of page {page_number} from kworb's page")
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -52,6 +50,7 @@ def process_kworb_html(page_number):
     """Processes the html of the page from kworb's page"""
     try:
         html = get_artists_kworb(page_number)
+
         soup = BeautifulSoup(html, "lxml")
         tr_list = soup.find_all("tr")
 
@@ -63,7 +62,7 @@ def process_kworb_html(page_number):
                 artist_column_map[i] = th.text.strip()
 
         # Create a list of dictionaries for each artist and their data
-        artist_list = []
+        artists = []
         for tr in tr_list[1:]:
             # Set these intitial values because we want these to come first in the json data structure.
             individual_artist = {
@@ -88,35 +87,30 @@ def process_kworb_html(page_number):
                             ] = int(td.text.strip().replace(",", ""))
                         elif artist_column_map[i] == "Artist":
                             individual_artist["artist_name"] = td.text.strip()
-            artist_list.append(individual_artist)
+            artists.append(individual_artist)
 
-        logger.info(f"Successfully processed html page {page_number} for kworb artists")
-        return artist_list
+        logger.info(f"Successfully processed artists from kworb's html page {page_number}")
+        return artists
     except Exception as e:
-        logger.error(f"Error processing html page {page_number} for kworb artists: {e}")
+        logger.error(f"Error processing artists from kworb's html page {page_number}: {e}")
         raise Exception(
-            f"Error processing html page {page_number} for kworb artists: {e}"
+            f"Error processing artists from kworb's html page {page_number}: {e}"
         )
 
 
-def get_artist_spotify(batch_artist_list, max_retries=3, sleep_time=1):
+def fetch_artists_batch_spotify(batch_artist_list, token, max_retries=3, sleep_time=1):
     """Gets the artist's metadata from the spotify api"""
-    try:
-        token = get_spotify_access_token()
-    except Exception as e:
-        logger.error(f"Error getting spotify access token: {e}")
-        raise Exception(f"Error getting spotify access token: {e}")
     for attempt in range(max_retries):
         try:
             headers = {"Authorization": f"Bearer {token}"}
+            url = "https://api.spotify.com/v1/artists"
 
             spotify_ids = [artist["spotify_id"] for artist in batch_artist_list]
             spotify_ids_str = ",".join(spotify_ids)
-
             params = {"ids": spotify_ids_str}
 
             response = requests.get(
-                f"https://api.spotify.com/v1/artists", headers=headers, params=params
+                url, headers=headers, params=params, timeout=10
             )
             response.raise_for_status()
             return response.json()
@@ -134,13 +128,14 @@ def get_artist_spotify(batch_artist_list, max_retries=3, sleep_time=1):
     )
 
 
-def process_spotify_response(artist_list, batch_size=50):
+def process_spotify_response(artists, batch_size=50):
     """Processes the spotify response for batches of artists"""
+    token = get_spotify_access_token()
     try:
-        logger.info(f"Processing spotify response for {len(artist_list)} artists")
-        for i in tqdm(range(0, len(artist_list), batch_size)):
-            batch_artist_list = artist_list[i : i + batch_size]
-            response = get_artist_spotify(batch_artist_list)
+        logger.info(f"Processing spotify response for {len(artists)} artists")
+        for i in tqdm(range(0, len(artists), batch_size)):
+            batch_artist_list = artists[i : i + batch_size]
+            response = fetch_artists_batch_spotify(batch_artist_list, token)
             for index, artist in enumerate(batch_artist_list):
                 artist["spotify_url"] = response["artists"][index]["external_urls"][
                     "spotify"
@@ -158,55 +153,44 @@ def process_spotify_response(artist_list, batch_size=50):
                 artist["spotify_meta"]["images"] = response["artists"][index]["images"]
             time.sleep(1)
         logger.info(
-            f"Successfully processed spotify response for {len(artist_list)} artists"
+            f"Successfully processed spotify response for {len(artists)} artists"
         )
-        return artist_list
+        return artists
     except Exception as e:
         logger.error(f"Error processing spotify response: {e}")
         raise Exception(f"Error processing spotify response: {e}")
 
 
-def write_to_gcs(artist_list, bucket_name, blob_name):
+def write_artists_to_gcs(artists, bucket_name, blob_name):
     """Writes the artist list to a json file in a gcp bucket"""
     try:
         client = storage.Client.from_service_account_json("gcp_creds.json")
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
-        blob.upload_from_string(json.dumps(artist_list, indent=3, ensure_ascii=False), content_type="application/json")
-        logger.info(f"Successfully wrote artist list to gcs bucket {bucket_name} with blob name {blob_name}")
+        blob.upload_from_string(json.dumps(artists, indent=3, ensure_ascii=False), content_type="application/json")
+        logger.info(f"Successfully wrote artists to gcs bucket {bucket_name} with blob name {blob_name}")
     except Exception as e:
-        logger.error(f"Error writing artist list to gcs bucket {bucket_name} with blob name {blob_name}: {e}")
-        raise Exception(f"Error writing artist list to gcs bucket {bucket_name} with blob name {blob_name}: {e}")
-
-
+        logger.error(f"Error writing artists to gcs bucket {bucket_name} with blob name {blob_name}: {e}")
+        raise Exception(f"Error writing artists to gcs bucket {bucket_name} with blob name {blob_name}: {e}")
+    
+def dry_run(artists):
+    try:
+        """Prints the artists to the console"""
+        with open("artists.json", "w") as f:
+            logger.info(f"Would write artists to artists.json")
+            json.dump(artists, f, indent=3, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Error writing artists to json file: {e}")
+        raise Exception(f"Error writing artists to json file: {e}")
 
 if __name__ == "__main__":
-    artist_list = process_kworb_html(1)
-    artist_list = process_spotify_response(artist_list)
-    write_to_gcs(artist_list, "music-ml-data", "raw-json-data/artists_page1_kworb/artists.json")
-
-# {
-#   "spotify_id": "19y5MFBH7gohEdGwKM7QsP",
-#   "name": "Luther Vandross",
-#   "spotify_url": "https://open.spotify.com/artist/19y5MFBH7gohEdGwKM7QsP",
-#   "ingested_at": "2025-08-24T12:00:00Z",
-#   "metrics": {
-#     "kworb": {
-#       "monthly_listeners": 5331858
-#     },
-#     "spotify": {
-#       "followers": 2500000,
-#       "popularity": 71,
-#     }
-#   },
-#   "spotify_meta": {
-#     "genres": ["r&b", "soul"],
-#     "images": [
-#       {
-#         "url": "https://i.scdn.co/image/abc",
-#         "height": 640,
-#         "width": 640
-#       }
-#     ]
-#   }
-# }
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--page_number", type=int, default=1, help="The page number of the kworb's page to scrape")
+    parser.add_argument("--dry_run", action="store_true", help="If true, the artists will not be written to gcs")
+    args = parser.parse_args()
+    artists = process_kworb_html(args.page_number)
+    artists = process_spotify_response(artists)
+    if args.dry_run:
+        dry_run(artists)
+    else:
+        write_artists_to_gcs(artists, "music-ml-data", f"raw-json-data/artists_page{args.page_number}_kworb/artists.json")
