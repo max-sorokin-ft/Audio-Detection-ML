@@ -70,6 +70,7 @@ def process_kworb_html(page_number):
                 "artist_name": None,
                 "spotify_url": None,
                 "init_processed_at": None,
+                "last_processed_at": None,
             }
             for i, td in enumerate(tr.find_all("td")):
                 if i in artist_column_map:
@@ -140,7 +141,12 @@ def process_spotify_response(artists, batch_size=50):
                 artist["spotify_url"] = response["artists"][index]["external_urls"][
                     "spotify"
                 ]
-                artist["init_processed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                if artist["init_processed_at"] is None:
+                    artist["init_processed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    artist["last_processed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    artist["last_processed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                
                 artist["metrics"]["spotify"] = {}
                 artist["metrics"]["spotify"]["followers"] = int(
                     response["artists"][index]["followers"]["total"]

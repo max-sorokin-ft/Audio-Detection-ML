@@ -48,7 +48,7 @@ def get_albums_from_spotify(spotify_artist_id, token, max_retries=3, sleep_time=
         try:
             url = f"https://api.spotify.com/v1/artists/{spotify_artist_id}/albums"
             headers = {"Authorization": f"Bearer {token}"}
-            params = {"limit": 50, "include_groups": "album,single", "market": "US"}
+            params = {"limit": 50, "include_groups": "album,single,compilation", "market": "US"}
             response = requests.get(url, headers=headers, params=params, timeout=10)
             response.raise_for_status()
             return response.json()
@@ -81,6 +81,7 @@ def process_albums_from_spotify(artist, token):
             individual_album["type"] = album["album_type"]
             individual_album["release_date"] = album["release_date"]
             individual_album["total_tracks"] = album["total_tracks"]
+            individual_album["is_processed"] = False
             individual_album["images"] = album["images"]
             album_list.append(individual_album)
         logger.info(
@@ -91,7 +92,6 @@ def process_albums_from_spotify(artist, token):
         logger.error(f"Error processing albums from spotify: {e}")
         raise Exception(f"Error processing albums from spotify: {e}")
 
-
 def write_albums_to_gcs(bucket_name, base_blob_name, artists):
     """Writes the albums to the gcs bucket"""
     try:
@@ -99,7 +99,7 @@ def write_albums_to_gcs(bucket_name, base_blob_name, artists):
         client = storage.Client.from_service_account_json("gcp_creds.json")
         for artist in tqdm(artists):
             bucket = client.bucket(bucket_name)
-            blob = bucket.blob(f"{base_blob_name}/{artist['spotify_id']}/albums.json")
+            blob = bucket.blob(f"{base_blob_name}/{artist['spotify_id']}_{artist['artist_name']}/albums.json")
             albums = process_albums_from_spotify(artist, token)
             blob.upload_from_string(
                 json.dumps(albums, indent=3, ensure_ascii=False),
@@ -123,9 +123,9 @@ def dry_run(artists, number_of_artists, base_blob_name):
         token = get_spotify_access_token()
         for artist in tqdm(artists[:number_of_artists]):
             albums = process_albums_from_spotify(artist, token)
-            with open(f"{artist['artist_name']} albums.json", "w") as f:
+            with open(f"{artist['spotify_id']}_{artist['artist_name']} albums.json", "w") as f:
                 logger.info(
-                    f"Would write {len(albums)} albums to {base_blob_name}/{artist['artist_name']}/albums.json"
+                    f"Dry run: Would write {len(albums)} albums to {base_blob_name}/{artist['spotify_id']}_{artist['artist_name']}/albums.json"
                 )
                 json.dump(albums, f, indent=3, ensure_ascii=False)
     except Exception as e:
