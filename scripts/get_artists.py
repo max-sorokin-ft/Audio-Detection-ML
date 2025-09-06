@@ -71,6 +71,7 @@ def process_kworb_html(page_number):
                 "spotify_url": None,
                 "init_processed_at": None,
                 "last_processed_at": None,
+                "full_blob_name": None,
             }
             for i, td in enumerate(tr.find_all("td")):
                 if i in artist_column_map:
@@ -88,6 +89,7 @@ def process_kworb_html(page_number):
                             ] = int(td.text.strip().replace(",", ""))
                         elif artist_column_map[i] == "Artist":
                             individual_artist["artist_name"] = td.text.strip()
+                        individual_artist["full_blob_name"] = f"raw-json-data/artists_page{page_number}_kworb/{individual_artist['spotify_id']}"
             artists.append(individual_artist)
 
         logger.info(f"Successfully processed artists from kworb's html page {page_number}")
@@ -183,7 +185,7 @@ def dry_run(artists):
     try:
         """Prints the artists to the console"""
         with open("artists.json", "w") as f:
-            logger.info(f"Would write artists to artists.json")
+            logger.info(f"Dry run: Would write artists to artists.json")
             json.dump(artists, f, indent=3, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Error writing artists to json file: {e}")

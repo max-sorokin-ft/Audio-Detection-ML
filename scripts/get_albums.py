@@ -44,26 +44,39 @@ def get_artists_from_gcs(bucket_name, blob_name):
 
 def get_albums_from_spotify(spotify_artist_id, token, max_retries=3, sleep_time=1):
     """Gets the albums for a given artist from the spotify api"""
-    for attempt in range(max_retries):
-        try:
-            url = f"https://api.spotify.com/v1/artists/{spotify_artist_id}/albums"
-            headers = {"Authorization": f"Bearer {token}"}
-            params = {"limit": 50, "include_groups": "album,single,compilation", "market": "US"}
-            response = requests.get(url, headers=headers, params=params, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            backoff_time = sleep_time * (2**attempt)
-            logger.warning(
-                f"Error getting artist's metadata from spotify api: {e}. Retrying in {backoff_time} seconds."
-            )
-            time.sleep(backoff_time)
-    logger.error(
-        f"Error getting albums from spotify. Failed after {max_retries} attempts."
-    )
-    raise RuntimeError(
-        f"Error getting albums from spotify. Failed after {max_retries} attempts."
-    )
+    url = f"https://api.spotify.com/v1/artists/{spotify_artist_id}/albums"
+    headers = {"Authorization": f"Bearer {token}"}
+    params = {"limit": 50, "include_groups": "album,single,compilation", "market": "US"}
+
+    all_album_items = []
+    page_url, page_params = url, params
+
+    try:
+        while True:
+            for attempt in range(max_retries):
+                try:
+                    response = requests.get(page_url, headers=headers, params=page_params, timeout=10)
+                    response.raise_for_status()
+                    data = response.json()
+                    all_album_items.extend(data["items"])
+                    
+                    next_url = data["next"]
+                    if not next_url:
+                        return all_album_items
+                    page_url, page_params = next_url, None
+                except Exception as e:
+                    backoff_time = sleep_time * (2**attempt)
+                    logger.warning(
+                        f"Error getting artist's metadata from spotify api: {e}. Retrying in {backoff_time} seconds."
+                    )
+                    time.sleep(backoff_time)
+    except Exception as e:
+        logger.error(
+            f"Error getting albums from spotify. Failed after {max_retries} attempts."
+        )
+        raise RuntimeError(
+            f"Error getting albums from spotify. Failed after {max_retries} attempts."
+        )
 
 
 def process_albums_from_spotify(artist, token):
@@ -71,8 +84,8 @@ def process_albums_from_spotify(artist, token):
     try:
         album_list = []
         spotify_id = artist["spotify_id"]
-        response = get_albums_from_spotify(spotify_id, token)
-        for album in response["items"]:
+        all_album_items = get_albums_from_spotify(spotify_id, token)
+        for album in all_album_items:
             individual_album = {}
             individual_album["id"] = album["id"]
             individual_album["name"] = album["name"]
@@ -83,6 +96,7 @@ def process_albums_from_spotify(artist, token):
             individual_album["total_tracks"] = album["total_tracks"]
             individual_album["is_processed"] = False
             individual_album["images"] = album["images"]
+            individual_album["full_blob_name"] = f"{artist['full_blob_name']}/{individual_album['id']}"
             album_list.append(individual_album)
         logger.info(
             f"Successfully processed {len(album_list)} albums for {artist['artist_name']} from spotify"
@@ -99,7 +113,7 @@ def write_albums_to_gcs(bucket_name, base_blob_name, artists):
         client = storage.Client.from_service_account_json("gcp_creds.json")
         for artist in tqdm(artists):
             bucket = client.bucket(bucket_name)
-            blob = bucket.blob(f"{base_blob_name}/{artist['spotify_id']}_{artist['artist_name']}/albums.json")
+            blob = bucket.blob(f"{artist['full_blob_name']}/albums.json")
             albums = process_albums_from_spotify(artist, token)
             blob.upload_from_string(
                 json.dumps(albums, indent=3, ensure_ascii=False),
@@ -123,9 +137,9 @@ def dry_run(artists, number_of_artists, base_blob_name):
         token = get_spotify_access_token()
         for artist in tqdm(artists[:number_of_artists]):
             albums = process_albums_from_spotify(artist, token)
-            with open(f"{artist['spotify_id']}_{artist['artist_name']} albums.json", "w") as f:
+            with open(f"{artist['full_blob_name']}/albums.json", "w") as f:
                 logger.info(
-                    f"Dry run: Would write {len(albums)} albums to {base_blob_name}/{artist['spotify_id']}_{artist['artist_name']}/albums.json"
+                    f"Dry run: Would write {len(albums)} albums to {artist['full_blob_name']}/albums.json"
                 )
                 json.dump(albums, f, indent=3, ensure_ascii=False)
     except Exception as e:
