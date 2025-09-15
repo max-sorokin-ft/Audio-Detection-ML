@@ -6,6 +6,7 @@ import logging
 import time
 from tqdm import tqdm
 import argparse
+import os
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s"
@@ -43,40 +44,40 @@ def get_artists_from_gcs(bucket_name, blob_name):
 
 
 def get_albums_from_spotify(spotify_artist_id, token, max_retries=3, sleep_time=1):
-    """Gets the albums for a given artist from the spotify api"""
     url = f"https://api.spotify.com/v1/artists/{spotify_artist_id}/albums"
     headers = {"Authorization": f"Bearer {token}"}
-    params = {"limit": 50, "include_groups": "album,single,compilation", "market": "US"}
+    params = {"limit": 50, "include_groups": "album,single", "market": "US"}
 
     all_album_items = []
     page_url, page_params = url, params
 
-    try:
-        while True:
-            for attempt in range(max_retries):
-                try:
-                    response = requests.get(page_url, headers=headers, params=page_params, timeout=10)
-                    response.raise_for_status()
-                    data = response.json()
-                    all_album_items.extend(data["items"])
-                    
-                    next_url = data["next"]
-                    if not next_url:
-                        return all_album_items
-                    page_url, page_params = next_url, None
-                except Exception as e:
-                    backoff_time = sleep_time * (2**attempt)
-                    logger.warning(
-                        f"Error getting artist's metadata from spotify api: {e}. Retrying in {backoff_time} seconds."
-                    )
-                    time.sleep(backoff_time)
-    except Exception as e:
-        logger.error(
-            f"Error getting albums from spotify. Failed after {max_retries} attempts."
-        )
-        raise RuntimeError(
-            f"Error getting albums from spotify. Failed after {max_retries} attempts."
-        )
+    while True:
+        success = False
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(page_url, headers=headers, params=page_params, timeout=10)
+
+                response.raise_for_status()
+                data = response.json()
+                success = True
+                break
+            except Exception as e:
+                backoff_time = sleep_time * (2 ** attempt)
+                logger.warning(
+                    f"Error getting artist's albums page from Spotify: {e}. Retrying in {backoff_time} seconds (attempt {attempt+1}/{max_retries})."
+                )
+                time.sleep(backoff_time)
+        if not success:
+            raise RuntimeError(
+                f"Error getting albums from Spotify for artist {spotify_artist_id}. Failed after {max_retries} attempts."
+            )
+
+        all_album_items.extend(data.get("items", []))
+
+        next_url = data.get("next")
+        if not next_url:
+            return all_album_items
+        page_url, page_params = next_url, None
 
 
 def process_albums_from_spotify(artist, token):
@@ -87,38 +88,38 @@ def process_albums_from_spotify(artist, token):
         all_album_items = get_albums_from_spotify(spotify_id, token)
         for album in all_album_items:
             individual_album = {}
-            individual_album["id"] = album["id"]
-            individual_album["name"] = album["name"]
-            individual_album["artist_name"] = artist["artist_name"]
-            individual_album["url"] = album["external_urls"]["spotify"]
+            individual_album["spotify_id"] = album["id"]
+            individual_album["album"] = album["name"]
+            individual_album["artist"] = artist["artist"]
+            individual_album["spotify_url"] = album["external_urls"]["spotify"]
             individual_album["type"] = album["album_type"]
             individual_album["release_date"] = album["release_date"]
             individual_album["total_tracks"] = album["total_tracks"]
             individual_album["is_processed"] = False
             individual_album["images"] = album["images"]
-            individual_album["full_blob_name"] = f"{artist['full_blob_name']}/{individual_album['id']}"
             album_list.append(individual_album)
         logger.info(
-            f"Successfully processed {len(album_list)} albums for {artist['artist_name']} from spotify"
+            f"Successfully processed {len(album_list)} albums for {artist['artist']} from spotify"
         )
         return album_list
     except Exception as e:
         logger.error(f"Error processing albums from spotify: {e}")
         raise Exception(f"Error processing albums from spotify: {e}")
 
-def write_albums_to_gcs(bucket_name, base_blob_name, artists):
+def write_albums_to_gcs(artists, bucket_name, base_blob_name):
     """Writes the albums to the gcs bucket"""
     try:
         token = get_spotify_access_token()
         client = storage.Client.from_service_account_json("gcp_creds.json")
+        bucket = client.bucket(bucket_name)
         for artist in tqdm(artists):
-            bucket = client.bucket(bucket_name)
             blob = bucket.blob(f"{artist['full_blob_name']}/albums.json")
             albums = process_albums_from_spotify(artist, token)
             blob.upload_from_string(
                 json.dumps(albums, indent=3, ensure_ascii=False),
                 content_type="application/json",
             )
+            time.sleep(0.5)
         logger.info(
             f"Successfully wrote albums for {len(artists)} artists to gcs bucket {bucket_name} with base blob name {base_blob_name}"
         )
@@ -131,17 +132,19 @@ def write_albums_to_gcs(bucket_name, base_blob_name, artists):
         )
 
 
-def dry_run(artists, number_of_artists, base_blob_name):
+def dry_run(artists, number_of_artists, base_blob_name, bucket_name):
     try:
         """Dry run to write albums for a given artist to a file"""
         token = get_spotify_access_token()
         for artist in tqdm(artists[:number_of_artists]):
             albums = process_albums_from_spotify(artist, token)
+            os.makedirs(artist['full_blob_name'], exist_ok=True)
             with open(f"{artist['full_blob_name']}/albums.json", "w") as f:
-                logger.info(
-                    f"Dry run: Would write {len(albums)} albums to {artist['full_blob_name']}/albums.json"
-                )
                 json.dump(albums, f, indent=3, ensure_ascii=False)
+            time.sleep(0.5)
+        logger.info(
+            f"Dry run: Would write {len(albums)} albums to gcs bucket {bucket_name} with base blob name {base_blob_name}"
+        )
     except Exception as e:
         logger.error(f"Error writing albums to json file: {e}")
         raise Exception(f"Error writing albums to json file: {e}")
@@ -153,7 +156,7 @@ if __name__ == "__main__":
         "--num_artists",
         type=int,
         default=1,
-        help="The number of artists to scrape",
+        help="The number of artists to get albums for",
     )
     parser.add_argument(
         "--dry_run",
@@ -164,22 +167,29 @@ if __name__ == "__main__":
         "--page_number",
         type=int,
         default=1,
-        help="The page number of the kworb's page to scrape",
+        help="The number of the kworb's page",
+    )
+    parser.add_argument(
+        "--batch_number",
+        type=int,
+        default=1,
+        help="The batch number of the artists",
     )
     args = parser.parse_args()
     artists = get_artists_from_gcs(
         "music-ml-data",
-        f"raw-json-data/artists_page{args.page_number}_kworb/artists.json",
+        f"raw-json-data/artists_kworbpage{args.page_number}/batch{args.batch_number}/artists.json",
     )
     if args.dry_run:
         dry_run(
             artists,
             args.num_artists,
-            f"raw-json-data/artists_page{args.page_number}_kworb",
+            f"raw-json-data/artists_kworbpage{args.page_number}/batch{args.batch_number}",
+            "music-ml-data",
         )
     else:
         write_albums_to_gcs(
-            "music-ml-data",
-            f"raw-json-data/artists_page{args.page_number}_kworb",
             artists,
+            "music-ml-data",
+            f"raw-json-data/artists_kworbpage{args.page_number}/batch{args.batch_number}",
         )
