@@ -2,7 +2,7 @@
 import requests
 from auth import get_spotify_access_token
 
-ARTIST_ID = "0du5cEVh5yTK9QJze8zA0C"  # Bruno Mars (any valid ID works)
+ARTIST_ID = "0du5cEVh5yTK9QJze8zA0C" 
 
 def main():
     token = get_spotify_access_token()
