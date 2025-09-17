@@ -44,6 +44,7 @@ def get_artists_from_gcs(bucket_name, blob_name):
 
 
 def get_albums_from_spotify(spotify_artist_id, token, max_retries=3, sleep_time=1):
+    """Gets the albums from the spotify api for a given artist"""
     url = f"https://api.spotify.com/v1/artists/{spotify_artist_id}/albums"
     headers = {"Authorization": f"Bearer {token}"}
     params = {"limit": 50, "include_groups": "album,single", "market": "US"}
@@ -84,11 +85,11 @@ def process_albums_from_spotify(artist, token):
     """Processes the albums for a given artist from the spotify api"""
     try:
         album_list = []
-        spotify_id = artist["spotify_id"]
-        all_album_items = get_albums_from_spotify(spotify_id, token)
+        all_album_items = get_albums_from_spotify(artist["spotify_artist_id"], token)
         for album in all_album_items:
             individual_album = {}
-            individual_album["spotify_id"] = album["id"]
+            individual_album["spotify_album_id"] = album["id"]
+            individual_album["spotify_artist_id"] = artist["spotify_artist_id"]
             individual_album["album"] = album["name"]
             individual_album["artist"] = artist["artist"]
             individual_album["spotify_url"] = album["external_urls"]["spotify"]

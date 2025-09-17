@@ -70,7 +70,7 @@ def process_kworb_html(page_number):
         for tr in tr_list[1:]:
             # Set these intitial values because we want these to come first in the json data structure.
             individual_artist = {
-                "spotify_id": None,
+                "spotify_artist_id": None,
                 "artist": None,
                 "spotify_url": None,
                 "init_processed_at": None,
@@ -82,8 +82,8 @@ def process_kworb_html(page_number):
                     if td.find("a"):
                         href = td.find("a")["href"]
                         second_part = href.split("/")[-1]
-                        spotify_id = second_part.split("_")[0]
-                        individual_artist["spotify_id"] = spotify_id
+                        spotify_artist_id = second_part.split("_")[0]
+                        individual_artist["spotify_artist_id"] = spotify_artist_id
                     if td.text.strip():
                         if artist_column_map[i] == "Listeners":
                             individual_artist["metrics"] = {}
@@ -116,9 +116,9 @@ def fetch_artists_batch_spotify(batch_artist_list, token, max_retries=3, sleep_t
             headers = {"Authorization": f"Bearer {token}"}
             url = "https://api.spotify.com/v1/artists"
 
-            spotify_ids = [artist["spotify_id"] for artist in batch_artist_list]
-            spotify_ids_str = ",".join(spotify_ids)
-            params = {"ids": spotify_ids_str}
+            spotify_artist_ids = [artist["spotify_artist_id"] for artist in batch_artist_list]
+            spotify_artist_ids_str = ",".join(spotify_artist_ids)
+            params = {"ids": spotify_artist_ids_str}
 
             response = requests.get(url, headers=headers, params=params, timeout=10)
             response.raise_for_status()
@@ -190,7 +190,7 @@ def write_artists_to_gcs(artists, bucket_name, base_blob_name, batch_size=GCS_BA
         try:
             batch_artists = artists[i : i + batch_size]
             for artist in batch_artists:
-                artist["full_blob_name"] = f"{base_blob_name}/batch{batch_number}/{artist['spotify_id']}"
+                artist["full_blob_name"] = f"{base_blob_name}/batch{batch_number}/{artist['spotify_artist_id']}"
             blob = bucket.blob(f"{base_blob_name}/batch{batch_number}/artists.json")
             blob.upload_from_string(
                 json.dumps(batch_artists, indent=3, ensure_ascii=False),
@@ -216,7 +216,7 @@ def dry_run(artists, base_blob_name, batch_size=GCS_BATCH_SIZE):
         try:
             """Prints the artists to the console"""
             for artist in batch_artists:
-                artist["full_blob_name"] = f"{base_blob_name}/batch{batch_number}/{artist['spotify_id']}"
+                artist["full_blob_name"] = f"{base_blob_name}/batch{batch_number}/{artist['spotify_artist_id']}"
             os.makedirs(f"{base_blob_name}/batch{batch_number}", exist_ok=True)
             with open(f"{base_blob_name}/batch{batch_number}/artists.json", "w") as f:
                 logger.info(f"Dry run: Would write artists to {base_blob_name}/batch{batch_number}/artists.json")
