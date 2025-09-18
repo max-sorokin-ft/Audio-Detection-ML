@@ -6,7 +6,6 @@ import logging
 import time
 from tqdm import tqdm
 import argparse
-import os
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s"
@@ -23,16 +22,10 @@ logger = logging.getLogger(__name__)
 def get_artists_from_gcs(bucket_name, blob_name):
     """Gets the artists from the gcs bucket"""
     try:
-        logger.info(
-            f"Getting artists from gcs bucket {bucket_name} with blob name {blob_name}"
-        )
         client = storage.Client.from_service_account_json("gcp_creds.json")
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
         artists = json.loads(blob.download_as_string())
-        logger.info(
-            f"Successfully got {len(artists)} artists from gcs bucket {bucket_name} with blob name {blob_name}"
-        )
         return artists
     except Exception as e:
         logger.error(
@@ -99,9 +92,6 @@ def process_albums_from_spotify(artist, token):
             individual_album["is_processed"] = False
             individual_album["images"] = album["images"]
             album_list.append(individual_album)
-        logger.info(
-            f"Successfully processed {len(album_list)} albums for {artist['artist']} from spotify"
-        )
         return album_list
     except Exception as e:
         logger.error(f"Error processing albums from spotify: {e}")
@@ -132,38 +122,8 @@ def write_albums_to_gcs(artists, bucket_name, base_blob_name):
             f"Error writing albums to gcs bucket {bucket_name} with base blob name {base_blob_name}: {e}"
         )
 
-
-def dry_run(artists, number_of_artists, base_blob_name, bucket_name):
-    try:
-        """Dry run to write albums for a given artist to a file"""
-        token = get_spotify_access_token()
-        for artist in tqdm(artists[:number_of_artists]):
-            albums = process_albums_from_spotify(artist, token)
-            os.makedirs(artist['full_blob_name'], exist_ok=True)
-            with open(f"{artist['full_blob_name']}/albums.json", "w") as f:
-                json.dump(albums, f, indent=3, ensure_ascii=False)
-            time.sleep(0.5)
-        logger.info(
-            f"Dry run: Would write {len(albums)} albums to gcs bucket {bucket_name} with base blob name {base_blob_name}"
-        )
-    except Exception as e:
-        logger.error(f"Error writing albums to json file: {e}")
-        raise Exception(f"Error writing albums to json file: {e}")
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--num_artists",
-        type=int,
-        default=1,
-        help="The number of artists to get albums for",
-    )
-    parser.add_argument(
-        "--dry_run",
-        action="store_true",
-        help="If true, the albums will not be written to gcs",
-    )
     parser.add_argument(
         "--page_number",
         type=int,
@@ -177,20 +137,14 @@ if __name__ == "__main__":
         help="The batch number of the artists",
     )
     args = parser.parse_args()
+
     artists = get_artists_from_gcs(
         "music-ml-data",
         f"raw-json-data/artists_kworbpage{args.page_number}/batch{args.batch_number}/artists.json",
     )
-    if args.dry_run:
-        dry_run(
-            artists,
-            args.num_artists,
-            f"raw-json-data/artists_kworbpage{args.page_number}/batch{args.batch_number}",
-            "music-ml-data",
-        )
-    else:
-        write_albums_to_gcs(
-            artists,
-            "music-ml-data",
-            f"raw-json-data/artists_kworbpage{args.page_number}/batch{args.batch_number}",
-        )
+    
+    write_albums_to_gcs(
+        artists,
+        "music-ml-data",
+        f"raw-json-data/artists_kworbpage{args.page_number}/batch{args.batch_number}",
+    )

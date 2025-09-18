@@ -23,12 +23,11 @@ logger = logging.getLogger(__name__)
 """
 
 GCS_BATCH_SIZE = 250
+BASE_URL = "https://kworb.net/spotify/listeners{page_number}.html"
 
 
 def get_artists_kworb(page_number):
     """Gets the html of the page from kworb's page"""
-    BASE_URL = "https://kworb.net/spotify/listeners{page_number}.html"
-    logger.info(f"Getting html of page {page_number} from kworb's page")
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         # If page number is 1, then the url is the base url for kworb's page.
@@ -141,7 +140,6 @@ def process_spotify_response(artists, batch_size=50):
     """Processes the spotify response for batches of artists"""
     token = get_spotify_access_token()
     try:
-        logger.info(f"Processing spotify response for {len(artists)} artists")
         for i in tqdm(range(0, len(artists), batch_size)):
             batch_artist_list = artists[i : i + batch_size]
             response = fetch_artists_batch_spotify(batch_artist_list, token)
@@ -172,9 +170,6 @@ def process_spotify_response(artists, batch_size=50):
                 artist["spotify_meta"]["genres"] = response["artists"][index]["genres"]
                 artist["spotify_meta"]["images"] = response["artists"][index]["images"]
             time.sleep(1)
-        logger.info(
-            f"Successfully processed spotify response for {len(artists)} artists"
-        )
         return artists
     except Exception as e:
         logger.error(f"Error processing spotify response: {e}")
@@ -209,24 +204,6 @@ def write_artists_to_gcs(artists, bucket_name, base_blob_name, batch_size=GCS_BA
             )
 
 
-def dry_run(artists, base_blob_name, batch_size=GCS_BATCH_SIZE):
-    batch_number = 1
-    for i in tqdm(range(0, len(artists), batch_size)):
-        batch_artists = artists[i : i + batch_size]
-        try:
-            """Prints the artists to the console"""
-            for artist in batch_artists:
-                artist["full_blob_name"] = f"{base_blob_name}/batch{batch_number}/{artist['spotify_artist_id']}"
-            os.makedirs(f"{base_blob_name}/batch{batch_number}", exist_ok=True)
-            with open(f"{base_blob_name}/batch{batch_number}/artists.json", "w") as f:
-                logger.info(f"Dry run: Would write artists to {base_blob_name}/batch{batch_number}/artists.json")
-                json.dump(batch_artists, f, indent=3, ensure_ascii=False)
-                batch_number += 1
-        except Exception as e:
-            logger.error(f"Error writing artists to json file: {e}")
-            raise Exception(f"Error writing artists to json file: {e}")
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -235,19 +212,11 @@ if __name__ == "__main__":
         default=1,
         help="The page number of the kworb's page to scrape",
     )
-    parser.add_argument(
-        "--dry_run",
-        action="store_true",
-        help="If true, the artists will not be written to gcs",
-    )
     args = parser.parse_args()
     artists = process_kworb_html(args.page_number)
     artists = process_spotify_response(artists)
-    if args.dry_run:
-        dry_run(artists, f"raw-json-data/artists_kworbpage{args.page_number}")
-    else:
-        write_artists_to_gcs(
-            artists,
-            "music-ml-data",
-            f"raw-json-data/artists_kworbpage{args.page_number}",
-        )
+    write_artists_to_gcs(
+        artists,
+        "music-ml-data",
+        f"raw-json-data/artists_kworbpage{args.page_number}",
+    )

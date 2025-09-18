@@ -6,7 +6,6 @@ import logging
 import time
 from tqdm import tqdm
 import argparse
-import os
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s"
@@ -23,16 +22,10 @@ logger = logging.getLogger(__name__)
 def get_artists_from_gcs(bucket_name, blob_name):
     """Gets the artists from the gcs bucket"""
     try:
-        logger.info(
-            f"Getting artists from gcs bucket {bucket_name} with blob name {blob_name}"
-        )
         client = storage.Client.from_service_account_json("gcp_creds.json")
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
         artists = json.loads(blob.download_as_string())
-        logger.info(
-            f"Successfully got {len(artists)} artists from gcs bucket {bucket_name} with blob name {blob_name}"
-        )
         return artists
     except Exception as e:
         logger.error(
@@ -61,27 +54,19 @@ def get_albums_from_gcs(artist, bucket_name):
         )
 
 
-def get_all_artist_album_songs_from_gcs(artist, bucket_name):
-    """Gets the songs from the gcs bucket for a given artist"""
+def get_all_artist_songs_from_gcs(artist, bucket_name):
+    """Gets all the songs combined from the gcs bucket for a given artist"""
     try:
         client = storage.Client.from_service_account_json("gcp_creds.json")
         bucket = client.bucket(bucket_name)
-        albums = get_albums_from_gcs(artist, bucket_name)
-        songs_list = []
-        for album in albums:
-            if album["type"] == "album":
-                songs_blob_name = (
-                    f"{artist['full_blob_name']}/{album['spotify_album_id']}/songs.json"
-                )
-                songs_blob = bucket.blob(songs_blob_name)
-                songs_list.extend(json.loads(songs_blob.download_as_string()))
-        return songs_list
+        blob = bucket.blob(f"{artist['full_blob_name']}/songs.json")
+        return json.loads(blob.download_as_string())
     except Exception as e:
         logger.error(
-            f"Error getting songs from gcs bucket {bucket_name} with blob name {songs_blob_name}: {e}"
+            f"Error getting all artist songs from gcs bucket {bucket_name} with blob name {artist['full_blob_name']}/songs.json: {e}"
         )
         raise Exception(
-            f"Error getting songs from gcs bucket {bucket_name} with blob name {songs_blob_name}: {e}"
+            f"Error getting all artist songs from gcs bucket {bucket_name} with blob name {artist['full_blob_name']}/songs.json: {e}"
         )
 
 
@@ -158,7 +143,6 @@ def process_artist_top_tracks_from_spotify(artist, token, top_n_tracks=10):
             artist["spotify_artist_id"], token
         )
         for track in top_tracks["tracks"][:top_n_tracks]:
-            if track["album"]["type"] == "single":
                 individual_song = {}
                 individual_song["spotify_song_id"] = track["id"]
                 individual_song["spotify_album_id"] = track["album"]["id"]
@@ -187,15 +171,13 @@ def dedupe_single_songs(artist, token, bucket_name):
     try:
         deduped_songs = []
         top_songs = process_artist_top_tracks_from_spotify(artist, token)
-        all_album_songs = get_all_artist_album_songs_from_gcs(artist, bucket_name)
-        count = 0
+        all_album_songs = get_all_artist_songs_from_gcs(artist, bucket_name)
         for song in top_songs:
             if song["spotify_song_id"] not in [
                 song["spotify_song_id"] for song in all_album_songs
             ]:
                 deduped_songs.append(song)
-                count += 1
-        logger.info(f"Successfully deduped {count} single songs for artist {artist['artist']}")
+        logger.info(f"Successfully deduped {len(deduped_songs)} single songs for artist {artist['artist']}")
         return deduped_songs
     except Exception as e:
         logger.error(f"Error deduping single songs: {e}")
@@ -209,11 +191,10 @@ def write_album_songs_to_gcs(artists, bucket_name, base_blob_name):
         client = storage.Client.from_service_account_json("gcp_creds.json")
         bucket = client.bucket(bucket_name)
         for artist in tqdm(artists):
-            count = 0
             albums = get_albums_from_gcs(artist, bucket_name)
+            all_album_songs = []
             for album in albums:
                 if album["type"] == "album":
-                    count += 1
                     blob = bucket.blob(
                         f"{artist['full_blob_name']}/{album['spotify_album_id']}/songs.json"
                     )
@@ -222,9 +203,18 @@ def write_album_songs_to_gcs(artists, bucket_name, base_blob_name):
                         json.dumps(songs, indent=3, ensure_ascii=False),
                         content_type="application/json",
                     )
+                    all_album_songs.extend(songs)
                     time.sleep(0.5)
-            print(
-                f"Successfully wrote albums' songs for {count} albums for artist {artist['artist']}"
+            logger.info(
+                f"Successfully wrote albums' songs for {len(albums)} albums for artist {artist['artist']} to gcs bucket {bucket_name} with blob name {base_blob_name} and seperate folders for each album."
+            )
+            blob = bucket.blob(f"{artist['full_blob_name']}/songs.json")
+            blob.upload_from_string(
+                json.dumps(all_album_songs, indent=3, ensure_ascii=False),
+                content_type="application/json",
+            )
+            logger.info(
+                f"Successfully wrote {len(all_album_songs)} albums' songs for {artist['artist']} to gcs bucket {bucket_name} with blob name {base_blob_name}/songs.json"
             )
         logger.info(
             f"Successfully wrote albums' songs for {len(artists)} artists to gcs bucket {bucket_name} with blob name {base_blob_name}"
@@ -238,31 +228,6 @@ def write_album_songs_to_gcs(artists, bucket_name, base_blob_name):
         )
 
 
-def write_all_artist_album_songs_to_gcs(artists, bucket_name, base_blob_name):
-    """Writes the all songs of an artist to the gcs bucket. First it writes songs from albums, and then writes singles that are in the top 10 tracks
-    of an artist and not among the all the songs from the albums. This is done to reduce API calls, since there are many more singles than albums.
-    It can remove some insignificant singles, and duplicate singles that are already in the albums.
-    """
-    try:
-        client = storage.Client.from_service_account_json("gcp_creds.json")
-        bucket = client.bucket(bucket_name)
-
-        for artist in tqdm(artists):
-            songs = get_all_artist_album_songs_from_gcs(artist, bucket_name)
-            blob = bucket.blob(f"{artist['full_blob_name']}/songs.json")
-            blob.upload_from_string(
-                json.dumps(songs, indent=3, ensure_ascii=False),
-                content_type="application/json",
-            )
-    except Exception as e:
-        logger.error(
-            f"Error writing all artist album songs to gcs bucket {bucket_name} with blob name {base_blob_name}: {e}"
-        )
-        raise Exception(
-            f"Error writing all artist album songs to gcs bucket {bucket_name} with blob name {base_blob_name}: {e}"
-        )
-
-
 def write_single_songs_to_gcs(artists, bucket_name, base_blob_name):
     """Writes the single songs to the album's folder"""
     try:
@@ -271,23 +236,32 @@ def write_single_songs_to_gcs(artists, bucket_name, base_blob_name):
         bucket = client.bucket(bucket_name)
 
         for artist in tqdm(artists):
-            songs = dedupe_single_songs(artist, token, bucket_name)
-            for song in songs:
+            single_songs = dedupe_single_songs(artist, token, bucket_name)
+            for song in single_songs:
                 blob = bucket.blob(
                     f"{artist['full_blob_name']}/{song['spotify_album_id']}/songs.json"
                 )
                 blob.upload_from_string(
-                    json.dumps(songs, indent=3, ensure_ascii=False),
+                    json.dumps(single_songs, indent=3, ensure_ascii=False),
                     content_type="application/json",
                 )
+            logger.info(
+                f"Successfully wrote {len(single_songs)} single songs for artist {artist['artist']} to gcs bucket {bucket_name} with blob name {base_blob_name} and seperate folders for each single."
+            )
             blob = bucket.blob(f"{artist['full_blob_name']}/songs.json")
-            existing_album_songs = json.loads(blob.download_as_string())
-            existing_album_songs.extend(songs)
+            existing_songs = json.loads(blob.download_as_string())
+            existing_songs.extend(single_songs)
             blob.upload_from_string(
-                json.dumps(existing_album_songs, indent=3, ensure_ascii=False),
+                json.dumps(existing_songs, indent=3, ensure_ascii=False),
                 content_type="application/json",
             )
+            logger.info(
+                f"Successfully added {len(single_songs)} single songs to {len(existing_songs)} existing songs for artist {artist['artist']}"
+            )
             time.sleep(0.5)
+        logger.info(
+            f"Successfully wrote single songs for {len(artists)} artists to gcs bucket {bucket_name} with blob name {base_blob_name}"
+        )
     except Exception as e:
         logger.error(
             f"Error writing single songs to gcs bucket {bucket_name} with blob name {base_blob_name}: {e}"
@@ -297,44 +271,8 @@ def write_single_songs_to_gcs(artists, bucket_name, base_blob_name):
         )
 
 
-# def write_all_artist_single_songs_to_gcs(artists, bucket_name, base_blob_name):
-#     """Writes the deduped single songs to the shares songs.json file"""
-#     try:
-#         token = get_spotify_access_token()
-#         client = storage.Client.from_service_account_json("gcp_creds.json")
-#         bucket = client.bucket(bucket_name)
-
-#         for artist in tqdm(artists):
-#             songs = dedupe_single_songs(artist, token, bucket_name)
-#             blob = bucket.blob(f"{artist['full_blob_name']}/songs.json")
-#             existing_album_songs = json.loads(blob.download_as_string())
-#             existing_album_songs.extend(songs)
-#             blob.upload_from_string(
-#                 json.dumps(existing_album_songs, indent=3, ensure_ascii=False),
-#                 content_type="application/json",
-#             )
-#     except Exception as e:
-#         logger.error(
-#             f"Error writing deduped single songs to gcs bucket {bucket_name} with blob name {base_blob_name}: {e}"
-#         )
-#         raise Exception(
-#             f"Error writing deduped single songs to gcs bucket {bucket_name} with blob name {base_blob_name}: {e}"
-#         )
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--num_artists",
-        type=int,
-        default=1,
-        help="The number of artists to get albums for",
-    )
-    parser.add_argument(
-        "--dry_run",
-        action="store_true",
-        help="If true, the albums will not be written to gcs",
-    )
     parser.add_argument(
         "--page_number",
         type=int,
@@ -352,26 +290,14 @@ if __name__ == "__main__":
         "music-ml-data",
         f"raw-json-data/artists_kworbpage{args.page_number}/batch{args.batch_number}/artists.json",
     )
-    if args.dry_run:
-        pass
-    else:
-        write_album_songs_to_gcs(
-            artists,
-            "music-ml-data",
-            f"raw-json-data/artists_kworbpage{args.page_number}/batch{args.batch_number}",
-        )
-        write_all_artist_album_songs_to_gcs(
-            artists,
-            "music-ml-data",
-            f"raw-json-data/artists_kworbpage{args.page_number}/batch{args.batch_number}",
-        )
-        write_single_songs_to_gcs(
-            artists,
-            "music-ml-data",
-            f"raw-json-data/artists_kworbpage{args.page_number}/batch{args.batch_number}",
-        )
-        # write_all_artist_single_songs_to_gcs(
-        #     artists,
-        #     "music-ml-data",
-        #     f"raw-json-data/artists_kworbpage{args.page_number}/batch{args.batch_number}",
-        # )
+
+    write_album_songs_to_gcs(
+        artists,
+        "music-ml-data",
+        f"raw-json-data/artists_kworbpage{args.page_number}/batch{args.batch_number}",
+    )
+    write_single_songs_to_gcs(
+        artists,
+        "music-ml-data",
+        f"raw-json-data/artists_kworbpage{args.page_number}/batch{args.batch_number}",
+    )
